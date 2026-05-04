@@ -1,0 +1,145 @@
+services:
+  traefik:
+    image: traefik:v3.0
+    container_name: traefik
+    restart: unless-stopped
+    command:
+      - "--api.dashboard=true"
+      - "--providers.docker=true"
+      - "--providers.docker.exposedbydefault=false"
+      - "--entrypoints.web.address=:80"
+      - "--entrypoints.web.http.redirections.entrypoint.to=websecure"
+      - "--entrypoints.web.http.redirections.entrypoint.scheme=https"
+      - "--entrypoints.websecure.address=:443"
+      - "--certificatesresolvers.duckdns.acme.dnschallenge=true"
+      - "--certificatesresolvers.duckdns.acme.dnschallenge.provider=duckdns"
+      - "--certificatesresolvers.duckdns.acme.dnschallenge.resolvers=1.1.1.1:53,8.8.8.8:53"
+      - "--certificatesresolvers.duckdns.acme.email=${TRAEFIK_EMAIL}"
+      - "--certificatesresolvers.duckdns.acme.storage=/letsencrypt/acme.json"
+    environment:
+      - DUCKDNS_TOKEN=${DUCKDNS_TOKEN}
+    ports:
+      - "80:80"
+      - "443:443"
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock:ro
+      - letsencrypt:/letsencrypt
+    networks:
+      - proxy
+    labels:
+      - "traefik.enable=true"
+      - "traefik.http.routers.dashboard.rule=Host(`traefik.${DOMAIN}`)"
+      - "traefik.http.routers.dashboard.entrypoints=websecure"
+      - "traefik.http.routers.dashboard.tls.certresolver=duckdns"
+      - "traefik.http.routers.dashboard.service=api@internal"
+
+  portainer:
+    image: portainer/portainer-ce:latest
+    container_name: portainer
+    restart: unless-stopped
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock:ro
+      - portainer_data:/data
+    networks:
+      - proxy
+    labels:
+      - "traefik.enable=true"
+      - "traefik.http.routers.portainer.rule=Host(`portainer.${DOMAIN}`)"
+      - "traefik.http.routers.portainer.entrypoints=websecure"
+      - "traefik.http.routers.portainer.tls.certresolver=duckdns"
+      - "traefik.http.services.portainer.loadbalancer.server.port=9000"
+
+  jellyfin:
+    image: jellyfin/jellyfin:latest
+    container_name: jellyfin
+    restart: unless-stopped
+    environment:
+      - JELLYFIN_PublishedServerUrl=https://jellyfin.${DOMAIN}
+    volumes:
+      - jellyfin_config:/config
+      - jellyfin_cache:/cache
+      - ${MEDIA_PATH}:/media:ro
+    networks:
+      - proxy
+    labels:
+      - "traefik.enable=true"
+      - "traefik.http.routers.jellyfin.rule=Host(`jellyfin.${DOMAIN}`)"
+      - "traefik.http.routers.jellyfin.entrypoints=websecure"
+      - "traefik.http.routers.jellyfin.tls.certresolver=duckdns"
+      - "traefik.http.services.jellyfin.loadbalancer.server.port=8096"
+
+  db:
+    image: mysql:8.0
+    container_name: blogverse_db
+    restart: unless-stopped
+    environment:
+      MYSQL_ROOT_PASSWORD: ${MYSQL_ROOT_PASSWORD}
+      MYSQL_DATABASE: ${MYSQL_DATABASE}
+      MYSQL_USER: ${MYSQL_USER}
+      MYSQL_PASSWORD: ${MYSQL_PASSWORD}
+    volumes:
+      - db_data:/var/lib/mysql
+    networks:
+      - blogverse-internal
+    healthcheck:
+      test:
+        ["CMD", "mysqladmin", "ping", "-h", "localhost", "-u", "root", "-p${MYSQL_ROOT_PASSWORD}"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  backend:
+    image: khaledabhe/tp2-6320936-blogverse-backend:${BACKEND_VERSION:-latest}
+    container_name: backend
+    restart: unless-stopped
+    depends_on:
+      db:
+        condition: service_healthy
+    environment:
+      DB_HOST: db
+      DB_PORT: 3306
+      DB_NAME: ${MYSQL_DATABASE}
+      DB_USER: root
+      DB_PASSWORD: ${MYSQL_ROOT_PASSWORD}
+      PORT: ${BACKEND_PORT:-4000}
+      NODE_ENV: production
+      JWT_SECRET: ${JWT_SECRET}
+      JWT_EXPIRES_IN: ${JWT_EXPIRES_IN:-7d}
+    networks:
+      - proxy
+      - blogverse-internal
+    labels:
+      - "traefik.enable=true"
+      - "traefik.http.routers.blogverse-api.rule=Host(`blogverse.${DOMAIN}`) && PathPrefix(`/api`)"
+      - "traefik.http.routers.blogverse-api.entrypoints=websecure"
+      - "traefik.http.routers.blogverse-api.tls.certresolver=duckdns"
+      - "traefik.http.services.blogverse-api.loadbalancer.server.port=4000"
+
+  frontend:
+    image: khaledabhe/tp2-6320936-blogverse-frontend:${FRONTEND_VERSION:-latest}
+    container_name: frontend
+    restart: unless-stopped
+    depends_on:
+      - backend
+    networks:
+      - proxy
+    labels:
+      - "traefik.enable=true"
+      - "traefik.http.routers.blogverse.rule=Host(`blogverse.${DOMAIN}`)"
+      - "traefik.http.routers.blogverse.entrypoints=websecure"
+      - "traefik.http.routers.blogverse.tls.certresolver=duckdns"
+      - "traefik.http.services.blogverse.loadbalancer.server.port=80"
+
+networks:
+  proxy:
+    name: proxy
+  blogverse-internal:
+    name: blogverse-internal
+    internal: true
+
+volumes:
+  letsencrypt:
+  portainer_data:
+  jellyfin_config:
+  jellyfin_cache:
+  db_data:
